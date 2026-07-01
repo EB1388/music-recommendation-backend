@@ -1,71 +1,95 @@
 const express = require('express');
 const app = express();
 
-// SECURITY: Allows your mobile app or frontend website to talk to this backend safely
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
     next();
 });
 
-// CACHE: Temporary local storage to save your request budget
 const cacheDatabase = {};
+
+// Fallback hardcoded recommendations to display if external APIs time out
+const fallbackTracks = [
+    "Save Your Tears by The Weeknd",
+    "As It Was by Harry Styles",
+    "Physical by Dua Lipa",
+    "Starboy by The Weeknd",
+    "Levitating by Dua Lipa"
+];
 
 app.get('/recommend', async (req, res) => {
     try {
         const { song, artist } = req.query;
 
-        // 1. INPUT SANITISATION: Keep your server secure from malicious code inputs
         if (!song || !artist) {
             return res.status(400).json({ error: "Missing song or artist parameters." });
         }
+
+        // Clean user strings safely
         const cleanSong = song.replace(/[^a-zA-Z0-9\s]/g, "").trim();
         const cleanArtist = artist.replace(/[^a-zA-Z0-9\s]/g, "").trim();
         const cacheKey = `${cleanSong}-${cleanArtist}`.toLowerCase();
 
-        // 2. CHECK CACHE: Serve immediately if another user already searched this song
+        // 1. Check cache database memory first
         if (cacheDatabase[cacheKey]) {
-            console.log("Serving from backend memory cache...");
-            return res.json({ source: "cache", recommendations: cacheDatabase[cacheKey] });
+            return res.json({ source: "cache_memory", recommendations: cacheDatabase[cacheKey] });
         }
 
-        // 3. RATE LIMIT DELAY: Inject a 2.5 second safe delay so the internet doesn't block your server
-        await new Promise(resolve => setTimeout(resolve, 2500));
-
-        // 4. MUSICBRAINZ API: Look up the song's unique internet identifier (MBID)
+        // 2. Safely extract song data from MusicBrainz
         const searchUrl = `https://musicbrainz.org{encodeURIComponent(cleanSong)}%20AND%20artist:${encodeURIComponent(cleanArtist)}&fmt=json&limit=1`;
-        const searchResponse = await fetch(searchUrl, { headers: { 'User-Agent': 'MyFreeMusicApp/1.0.0 (contact@example.com)' } });
-        const searchData = await searchResponse.json();
-
-        const mbid = searchData.recordings?.[0]?.id;
-        if (!mbid) {
-            return res.json({ source: "fallback", recommendations: [`Other hits by ${cleanArtist}`] });
+        
+        const searchResponse = await fetch(searchUrl, { 
+            headers: { 'User-Agent': 'FreeMusicDiscoveryEngine/2.0.0 (contact@example.com)' } 
+        });
+        
+        if (!searchResponse.ok) {
+            throw new Error("MusicBrainz network down.");
         }
 
-        // 5. LISTENBRAINZ API: Pull recommendations based on real human listening data using the MBID
+        const searchData = await searchResponse.json();
+        
+        // SAFE PARSING: Prevents the server from crashing if structural changes occur
+        if (!searchData || !searchData.recordings || searchData.recordings.length === 0) {
+            return res.json({ source: "fallback_database", recommendations: fallbackTracks });
+        }
+
+        const mbid = searchData.recordings[0].id;
+        if (!mbid) {
+            return res.json({ source: "fallback_database", recommendations: fallbackTracks });
+        }
+
+        // 3. Extract crowdsourced listener metrics via ListenBrainz
         const recommendUrl = `https://listenbrainz.org{mbid}/similar-recordings`;
         const recommendResponse = await fetch(recommendUrl);
-        const recommendData = await recommendResponse.json();
+        
+        if (!recommendResponse.ok) {
+            return res.json({ source: "fallback_database", recommendations: fallbackTracks });
+        }
 
-        // Extract song names from the human listening data response
-        const tracks = recommendData.payload?.recordings || [];
-        const recommendations = tracks.slice(0, 5).map(track => `${track.recording_name} by ${track.artist_name}`);
+        const recommendData = await recommendResponse.json();
+        const tracks = recommendData?.payload?.recordings || [];
+
+        // Map and extract tracks into simple text lines
+        const recommendations = tracks.slice(0, 5).map(track => {
+            return `${track.recording_name || "Unknown Track"} by ${track.artist_name || "Unknown Artist"}`;
+        });
 
         if (recommendations.length > 0) {
-            cacheDatabase[cacheKey] = recommendations; // Save to memory cache
-            return res.json({ source: "listenbrainz_human_data", recommendations });
+            cacheDatabase[cacheKey] = recommendations;
+            return res.json({ source: "listenbrainz_crowdsourced_data", recommendations });
         } else {
-            return res.json({ source: "fallback", recommendations: [`Popular tracks near the genre of ${cleanSong}`] });
+            return res.json({ source: "fallback_database", recommendations: fallbackTracks });
         }
 
     } catch (error) {
-        console.error("Server processing error:", error);
-        return res.status(500).json({ error: "Recommendation engine temporarily busy." });
+        console.error("Internal Server Error caught cleanly:", error);
+        // CRASH PROTECTION: Always return valid data to the browser, even if everything breaks
+        return res.json({ source: "emergency_fallback", recommendations: fallbackTracks });
     }
 });
 
-// Dynamically use the cloud provider's network port, default to 8000 locally
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => {
-    console.log(`Server running live on port ${PORT}`);
+    console.log(`Server executing safely on port ${PORT}`);
 });
